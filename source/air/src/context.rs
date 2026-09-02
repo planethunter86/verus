@@ -282,6 +282,35 @@ impl Context {
         }
     }
 
+    fn set_logic_str(&mut self, logic: &str) {
+        self.smt_log.log_node(&node!((set-logic {str_to_node(logic)})));
+    }
+
+    /// Narrow this context's SMT logic and apply the options it unlocks.
+    ///
+    /// Only meaningful for solvers that take a logic (cvc5); a no-op for Z3.
+    /// Must be called before anything is asserted, because cvc5 fixes its
+    /// configuration at the first assert -- hence the `NotStarted` guard, the
+    /// same restriction that applies to `set_rlimit` above.
+    /// Returns whether the spec was applied.
+    pub fn set_logic(&mut self, spec: &crate::logic::LogicSpec) -> bool {
+        if !matches!(self.solver, SmtSolver::Cvc5) {
+            return false;
+        }
+        if !matches!(self.state, ContextState::NotStarted) {
+            return false;
+        }
+        let Some(logic) = &spec.logic else {
+            return false;
+        };
+        self.comment(&format!("logic narrowed from ALL to {}", logic));
+        self.set_logic_str(logic);
+        for (option, value) in spec.options.iter() {
+            self.log_set_z3_param(option, value);
+        }
+        true
+    }
+
     pub fn set_single_check_query(&mut self) {
         self.single_check_query = true;
         self.air_initial_log.log_set_option("single_check_query", "true");
@@ -333,7 +362,9 @@ impl Context {
                     self.set_z3_param_bool("rewriter.sort_disjunctions", false, true);
                 }
                 SmtSolver::Cvc5 => {
-                    self.smt_log.log_node(&node!((set-logic {str_to_node("ALL")})));
+                    // Conservative default. A caller that knows the full content
+                    // of this context up front may narrow it with set_logic.
+                    self.set_logic_str("ALL");
                     self.set_z3_param_bool("incremental", true, true);
                 }
             }

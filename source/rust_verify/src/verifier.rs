@@ -1250,7 +1250,21 @@ impl Verifier {
         Ok(air_context)
     }
 
-    /// Per-query SMT tuning options.
+    /// Per-query SMT tuning, applied to a spun-off context after its background
+    /// (prelude plus bucket context) has already been emitted.
+    ///
+    /// Z3 ONLY. cvc5 fixes its configuration at the first `assert` and rejects
+    /// any later change with "solver is already fully initialized". Every caller
+    /// reaches this point after the background has been emitted -- for a
+    /// Nonlinear context that is on the order of a hundred asserts -- so an
+    /// option set here never reaches cvc5.
+    ///
+    /// cvc5 tuning has to happen *before* the background instead. See
+    /// `air::logic` for deriving a logic and the options it unlocks from a
+    /// query's contents, `Context::set_logic` for applying them (guarded on
+    /// `ContextState::NotStarted`), and the `BitVector` branch in
+    /// `verify_bucket` for the one context whose content is fully known up
+    /// front. Bit-vector tuning is done there, not here.
     fn apply_per_query_smt_options(
         &self,
         air_context: &mut air::context::Context,
@@ -1258,14 +1272,14 @@ impl Verifier {
     ) {
         match prover_choice {
             vir::def::ProverChoice::BitVector => {
-                // A prelude-free by(bit_vector) query carries no per-query
-                // options: solver defaults work well.
-                //
-                // TODO: tune Z3/CVC5 options for bit-vector queries
+                // Handled before the prelude via Context::set_logic, which can
+                // additionally narrow the logic. Nothing to do here.
             }
             vir::def::ProverChoice::Nonlinear => match self.args.solver {
                 air::context::SmtSolver::Z3 => air_context.set_z3_param("smt.arith.solver", "6"),
-                // TODO: What cvc5 settings would help here?
+                // Deliberately empty: see the note above. cvc5 candidates such
+                // as --nl-cov would have to be applied before the prelude, not
+                // at this call site, where cvc5 rejects them outright.
                 air::context::SmtSolver::Cvc5 => {}
             },
             vir::def::ProverChoice::DefaultProver | vir::def::ProverChoice::Singular => {}
@@ -1581,6 +1595,20 @@ impl Verifier {
                                 // for bitvector, only one query, no push/pop
                                 if cmds.prover_choice == vir::def::ProverChoice::BitVector {
                                     spinoff_z3_context.set_single_check_query();
+                                    // A by(bit_vector) context is prelude-free and
+                                    // holds exactly one query, so its full content
+                                    // is known before anything reaches the solver.
+                                    // That is the only situation in which the logic
+                                    // can be narrowed, since cvc5 fixes its
+                                    // configuration at the first assert.
+                                    let solver = *spinoff_z3_context.get_solver();
+                                    for command in cmds.commands.iter() {
+                                        if let air::ast::CommandX::CheckValid(query) = &**command {
+                                            let spec = air::logic::features_of(&[], query)
+                                                .to_spec(&solver);
+                                            spinoff_z3_context.set_logic(&spec);
+                                        }
+                                    }
                                 }
                                 // Apply prover-specific SMT tuning.
                                 self.apply_per_query_smt_options(
